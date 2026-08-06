@@ -1,12 +1,43 @@
-# CLAUDE.md — Procure API
+# CLAUDE.md — Home Budget API
 
 Context for AI-assisted work on this repo. Read this before writing or changing code.
 
+> This project was pivoted from a procurement API to a household budget / receipt
+> tracker. The **engineering skeleton is unchanged** (layered architecture, dual
+> database, transactional writes, JWT auth). The **domain is new**: stores, receipts
+> with line items, budget categories, a global barcode product catalog, and an
+> in-app shopping list. Where old procurement rules and new domain rules conflict,
+> the rules below win — do not "restore" supplier/order/buyer semantics.
+
 ## What this is
 
-A REST API for managing suppliers and purchase orders. Node.js + TypeScript (`strict`),
-Express, PostgreSQL (Neon) for the transactional core, MongoDB (Atlas) for an audit log.
-The procurement domain is deliberate — it justifies the two-database design.
+A REST API for tracking household spending. Node.js + TypeScript (`strict`),
+Express, PostgreSQL (Neon) for the transactional core, MongoDB (Atlas) for an
+append-only audit log. The two-database split is retained: relational data with
+real foreign keys in Postgres, write-heavy schema-flexible history in Mongo.
+
+## Domain model (source of truth: `src/db/schema.sql`)
+
+- **users** — household members. `role`: `member` (default) | `admin`.
+- **categories** — budget categories with an OPTIONAL `monthly_budget` cap. Actual
+  spend is NEVER stored; it is derived by summing confirmed receipts per category
+  per month.
+- **stores** — where you shop (`chain` groups branches of one brand).
+- **products** — global catalog keyed by a globally-UNIQUE `barcode`. **No price**
+  here: price is store/time-dependent and lives on `receipt_items`. The catalog
+  grows as items are scanned.
+- **receipts** — one shopping trip (the analogue of the old `purchase_orders`).
+- **receipt_items** — line items (analogue of `order_items`); `ON DELETE CASCADE`
+  with the receipt. `product_id` links a line to the catalog when a barcode matched.
+- **shopping_list_items** — in-app shopping list (Reminders has no web API); ticking
+  an item sets `is_checked`.
+
+Two load-bearing decisions — do not "fix" these:
+- **`receipts.total` is the authoritative amount paid, taken from the receipt — it is
+  NOT recomputed from line items.** Real receipts differ from the item sum due to
+  discounts, promotions, rounding and deposits (פיקדון). `total` drives the budget.
+- **`purchased_at` (date on the receipt) is distinct from `created_at` (when the row
+  was inserted / photo scanned).** Budget month is decided by `purchased_at`.
 
 ## Commands
 
@@ -16,30 +47,37 @@ The procurement domain is deliberate — it justifies the two-database design.
 - `npm test` — Jest + Supertest suite
 - `npm start` — run the compiled build from `dist/`
 
+## Definition of done (check before declaring a task complete)
+
+1. `npm run build` passes under `strict` (no `any`, no `as any`).
+2. `npm test` passes, including negative paths (400/401/403/404/409 as applicable).
+3. `npm run migrate` runs clean against a fresh database.
+4. New resources mirror the existing layer pattern exactly (see below).
+
 ## Project layout
 
 ```
 src/
-  config/      env (zod-validated), postgres (pool), mongo (mongoose)
-  db/          schema.sql, migrate.ts
-  errors/      AppError
-  utils/       asyncHandler
-  middleware/  validate (validateBody), require-auth (requireAuth, requireRole)
-  validators/  zod schemas per resource
+  config/       env (zod-validated), postgres (pool), mongo (mongoose)
+  db/           schema.sql, migrate.ts
+  errors/       AppError
+  utils/        asyncHandler
+  middleware/   validate (validateBody), require-auth (requireAuth, requireRole)
+  validators/   zod schemas per resource
   repositories/ SQL only — the ONLY layer that talks to Postgres
-  services/    business logic
-  controllers/ thin request/response orchestration
-  routes/      route definitions + middleware wiring
-  models/      Mongoose models (audit log)
-  types/       express.d.ts (declaration merging for req.user)
-  app.ts       Express app (no port) — imported by tests
-  server.ts    connects DBs, then listens
+  services/     business logic
+  controllers/  thin request/response orchestration
+  routes/       route definitions + middleware wiring
+  models/       Mongoose models (audit log)
+  types/        express.d.ts (declaration merging for req.user)
+  app.ts        Express app (no port) — imported by tests
+  server.ts     connects DBs, then listens
 ```
 
 ## Architecture conventions (follow these; they are the de facto standard)
 
 - **Layering:** routes → controller → service → repository. Keep each layer thin
-  and single-purpose. New resources follow the suppliers/orders pattern exactly.
+  and single-purpose. New resources follow the existing pattern exactly.
 - **Errors:** throw `AppError(statusCode, message)`. The central error handler in
   `app.ts` turns it into the HTTP response. Do not build ad-hoc error responses in
   controllers.
@@ -55,15 +93,17 @@ src/
 
 ## Database rules
 
-- **Postgres = transactional core** (users, suppliers, purchase_orders, order_items).
-  All queries **parameterized** (`$1, $2`) via the shared `pool`/`query`. Never
-  string-concatenate user input into SQL.
-- **Transactions** (e.g. create order + items): take a dedicated client with
+- **Postgres = transactional core** (users, categories, stores, products, receipts,
+  receipt_items, shopping_list_items). All queries **parameterized** (`$1, $2`) via
+  the shared `pool`/`query`. Never string-concatenate user input into SQL.
+- **Transactions** (create receipt + items): take a dedicated client with
   `pool.connect()`, run `BEGIN` → work → `COMMIT`, `ROLLBACK` in `catch`, and
   **always** `client.release()` in `finally`. Do NOT use the shared `query()` inside
-  a transaction (it grabs an arbitrary pooled connection).
+  a transaction (it grabs an arbitrary pooled connection). This is a direct port of
+  the original `createOrderWithItems` transaction.
 - **Money is `NUMERIC(12,2)`** and comes back from `pg` as a **string**. Keep it a
-  string end-to-end; never round-trip through float.
+  string end-to-end; never round-trip through float. `receipt_items.quantity` is
+  `NUMERIC(10,3)` (goods sold by weight) — also a string.
 - **MongoDB = append-only audit log** (who/what/when). Writes are **fire-and-forget**:
   `recordAudit(...)` must catch its own errors and NEVER throw into the caller — a
   failed audit write must not break the main operation. Call it AFTER the Postgres
@@ -71,12 +111,17 @@ src/
 
 ## Security rules (do not regress these)
 
-- **Never trust the client** for server-owned fields: compute order `total` on the
-  server from the items; take `created_by` from `req.user.id`, not the request body.
-- **Registration always creates role `buyer`.** Admin is granted out-of-band (SQL).
+- **Never trust the client** for server-owned fields: take `created_by` /
+  `added_by` from `req.user.id`, never from the request body.
+- **`receipts.total` is validated, not invented by the client silently** — accept it
+  as the paid amount, but never recompute it from items (see domain model). Reject
+  negative totals.
+- **Registration always creates role `member`.** Admin is granted out-of-band (SQL).
   Never let the API set an arbitrary role from user input.
-- **Write operations are admin-only** (`requireAuth` + `requireRole("admin")`); reads
-  are for any authenticated user. Match the suppliers/orders routers.
+- **Authorisation model:** any authenticated member can read, create receipts, and
+  manage the shopping list. `requireRole("admin")` guards only **destructive/config**
+  actions — deleting stores or categories, and changing user roles. (This is the
+  key difference from the old procurement API, where all writes were admin-only.)
 - **Login returns a generic 401** ("Invalid email or password") for both wrong
   password and unknown email — don't leak which emails exist.
 - **JWT carries `{ sub, role }`**, signed with `JWT_SECRET`. Verify with `jwt.verify`
@@ -85,16 +130,15 @@ src/
 ## Auth / roles
 
 - `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
-- Roles: `buyer` (default) and `admin`.
+- Roles: `member` (default) and `admin`.
 - Role is baked into the JWT at login. Changing a user's role in the DB does NOT
   affect existing tokens — the user must log in again to get a token with the new role.
 
 ## Environment variables (see .env, which is gitignored)
 
 `PORT`, `NODE_ENV`, `POSTGRES_URL`, `POSTGRES_SSL` (`true` for Neon/cloud, `false`
-for local Docker), `MONGO_URL` (include the `/procure` database name before `?`),
-`JWT_SECRET` (min 8 chars), `JWT_EXPIRES_IN`. Env is validated by zod in
-`src/config/env.ts` and the app fails fast if any are missing.
+for local Docker), `MONGO_URL`, `JWT_SECRET` (min 8 chars), `JWT_EXPIRES_IN`. Env is
+validated by zod in `src/config/env.ts` and the app fails fast if any are missing.
 
 ## Testing conventions
 
@@ -114,11 +158,14 @@ for local Docker), `MONGO_URL` (include the `/procure` database name before `?`)
   with `lsof -i:3000`.
 - **Verify you're testing the current build, not a stale process,** when behavior
   looks wrong but the code looks right.
-- **The seeded `test@example.com` account is `admin`** (promoted via SQL), so any
-  login as it yields an admin token. Use a separate account for buyer-role tests.
+- **After the pivot, the database schema is new.** Run `npm run migrate` on a fresh
+  DB (or drop the old procurement tables); `IF NOT EXISTS` will not migrate old ones.
 
 ## Status
 
-Done: auth (register/login/JWT/roles + tests), suppliers CRUD, orders CRUD with a
-transactional create, MongoDB audit log, Docker, GitHub Actions CI.
-Planned: CSV catalog import + orders export using Node streams.
+- Done: auth (register/login/JWT/roles + tests), MongoDB audit log, Docker, CI.
+- Done: schema pivoted to the home-budget domain (`src/db/schema.sql`).
+- In progress: re-implementing the resource layers for the new domain
+  (stores, categories, products, receipts, shopping list).
+- Planned: receipt OCR (image → draft receipt), barcode scan + Open Food Facts
+  lookup, budget rollups + Google Sheets export, shopping-list Shortcuts bridge.
