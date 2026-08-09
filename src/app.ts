@@ -3,6 +3,9 @@ import pinoHttp from "pino-http";
 import { authRouter } from "./routes/auth.routes";
 import { suppliersRouter } from "./routes/supplier.routes";
 import { ordersRouter } from "./routes/order.routes";
+import { storesRouter } from "./routes/store.routes";
+import { categoriesRouter } from "./routes/category.routes";
+import { receiptsRouter } from "./routes/receipt.routes";
 import { AppError } from "./errors/app-error";
 
 // The Express app is built here (routes + middleware) but NOT started.
@@ -22,6 +25,9 @@ app.get("/health", (_req: Request, res: Response) => {
 app.use("/auth", authRouter);
 app.use("/suppliers", suppliersRouter);
 app.use("/orders", ordersRouter);
+app.use("/stores", storesRouter);
+app.use("/categories", categoriesRouter);
+app.use("/receipts", receiptsRouter);
 
 // 404 for anything unmatched.
 app.use((_req: Request, res: Response) => {

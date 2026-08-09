@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import { AnyZodObject } from "zod";
+import { ZodTypeAny } from "zod";
 import { AppError } from "../errors/app-error";
 
-export function validateBody(schema: AnyZodObject) {
+export function validateBody(schema: ZodTypeAny) {
   return (req: Request, _res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.body);
     if (!result.success) {
