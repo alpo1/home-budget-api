@@ -99,8 +99,9 @@ src/
 - **Transactions** (create receipt + items): take a dedicated client with
   `pool.connect()`, run `BEGIN` → work → `COMMIT`, `ROLLBACK` in `catch`, and
   **always** `client.release()` in `finally`. Do NOT use the shared `query()` inside
-  a transaction (it grabs an arbitrary pooled connection). This is a direct port of
-  the original `createOrderWithItems` transaction.
+  a transaction (it grabs an arbitrary pooled connection). The canonical
+  implementation is `createReceiptWithItems` in
+  `src/repositories/receipt.repository.ts`.
 - **Money is `NUMERIC(12,2)`** and comes back from `pg` as a **string**. Keep it a
   string end-to-end; never round-trip through float. `receipt_items.quantity` is
   `NUMERIC(10,3)` (goods sold by weight) — also a string.
@@ -163,9 +164,18 @@ validated by zod in `src/config/env.ts` and the app fails fast if any are missin
 
 ## Status
 
-- Done: auth (register/login/JWT/roles + tests), MongoDB audit log, Docker, CI.
+- Done: auth (register/login/JWT/roles), MongoDB audit log, Docker, CI.
 - Done: schema pivoted to the home-budget domain (`src/db/schema.sql`).
-- In progress: re-implementing the resource layers for the new domain
-  (stores, categories, products, receipts, shopping list).
-- Planned: receipt OCR (image → draft receipt), barcode scan + Open Food Facts
-  lookup, budget rollups + Google Sheets export, shopping-list Shortcuts bridge.
+- Done vertical slices (routes → controller → service → repository, with tests
+  and negative-path coverage): **stores, categories, receipts**.
+  - `receipts` includes the transactional `createReceiptWithItems`
+    (dedicated client, BEGIN/COMMIT/ROLLBACK/release) with a rollback test.
+- Not yet built: **products** layer, **shopping_list** layer (tables exist in
+  the schema; no route/controller/service/repository yet).
+- Next feature: receipt OCR (image → draft receipt). Several decisions are
+  still open and must be resolved before starting: photo storage location
+  (object storage vs local disk), where the extracted-but-unlinked store name
+  lives (a nullable column on `receipts` vs a Mongo sidecar), and whether
+  draft→confirm review is a separate later slice.
+- Planned after OCR: barcode scan + Open Food Facts lookup, budget rollups +
+  Google Sheets export, shopping-list Shortcuts bridge.
