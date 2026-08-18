@@ -33,6 +33,7 @@ real foreign keys in Postgres, write-heavy schema-flexible history in Mongo.
   an item sets `is_checked`.
 
 Two load-bearing decisions — do not "fix" these:
+
 - **`receipts.total` is the authoritative amount paid, taken from the receipt — it is
   NOT recomputed from line items.** Real receipts differ from the item sum due to
   discounts, promotions, rounding and deposits (פיקדון). `total` drives the budget.
@@ -167,11 +168,14 @@ validated by zod in `src/config/env.ts` and the app fails fast if any are missin
 - Done: auth (register/login/JWT/roles), MongoDB audit log, Docker, CI.
 - Done: schema pivoted to the home-budget domain (`src/db/schema.sql`).
 - Done vertical slices (routes → controller → service → repository, with tests
-  and negative-path coverage): **stores, categories, receipts**.
+  and negative-path coverage): **stores, categories, receipts, products**.
   - `receipts` includes the transactional `createReceiptWithItems`
     (dedicated client, BEGIN/COMMIT/ROLLBACK/release) with a rollback test.
-- Not yet built: **products** layer, **shopping_list** layer (tables exist in
-  the schema; no route/controller/service/repository yet).
+  - `products` enforces the globally-unique `barcode` (nullable for loose/weighed
+    items; duplicate → 409) and a `default_category_id` FK (bad ref → 400);
+    DELETE is admin-only. Test suite is 86 green across 7 files.
+- Not yet built: **shopping_list** layer (table exists in the schema; no
+  route/controller/service/repository yet).
 - Next feature: receipt OCR (image → draft receipt). Several decisions are
   still open and must be resolved before starting: photo storage location
   (object storage vs local disk), where the extracted-but-unlinked store name
