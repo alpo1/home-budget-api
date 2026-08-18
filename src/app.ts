@@ -5,6 +5,7 @@ import { storesRouter } from "./routes/store.routes";
 import { categoriesRouter } from "./routes/category.routes";
 import { receiptsRouter } from "./routes/receipt.routes";
 import { AppError } from "./errors/app-error";
+import { productsRouter } from "./routes/product.routes";
 
 // The Express app is built here (routes + middleware) but NOT started.
 // server.ts is responsible for connecting to the databases and listening.
@@ -24,6 +25,7 @@ app.use("/auth", authRouter);
 app.use("/stores", storesRouter);
 app.use("/categories", categoriesRouter);
 app.use("/receipts", receiptsRouter);
+app.use("/products", productsRouter);
 
 // 404 for anything unmatched.
 app.use((_req: Request, res: Response) => {
